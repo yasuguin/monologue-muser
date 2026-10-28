@@ -3,7 +3,7 @@ import textwrap
 
 import config
 from google import genai
-from schema import SummaryResponse, TranscriptionResponse, error_summary
+from schema import SummaryResponse, TranscriptionResponse
 
 # genai.Client は import 時ではなく初回利用時に生成する。
 # 認証なしのテスト環境で import できること、Cloud Run コールドスタートでの遅延初期化が目的。
@@ -122,18 +122,16 @@ def _summarize(transcription: str) -> dict:
 def transcribe_and_summarize(file_path: str) -> dict:
     """音声ファイルを文字起こし→整形要約し、markdown / nextActions / tags を返す。
 
-    成功・失敗のどちらでも同じキー集合（markdown / nextActions / tags）を返す。
-    失敗種別ごとにエラー内容を markdown に残し、tags にエラー種別を入れることで、
-    Notion 側でユーザーが失敗に気づけるようにする（現挙動を維持）。
+    失敗は呼び出し元に伝え、イベントの再配信につなげる。
     """
     try:
         transcription = _transcribe(file_path)
     except Exception as e:
         print(f"文字起こし中にエラーが発生しました: {e}")
-        return error_summary(str(e), "文字起こしエラー")
+        raise
 
     try:
         return _summarize(transcription)
     except Exception as e:
         print(f"文字起こしまたは要約中にエラーが発生しました: {e}")
-        return error_summary(str(e), "要約エラー")
+        raise

@@ -1,4 +1,4 @@
-"""upload-monologue/main.py の振る舞いテスト。
+"""monologue-uploader/main.py の振る舞いテスト。
 
 GCP 認証 (google.auth.default, storage.Client, blob.generate_signed_url) は
 テスト内で mock する。functions-framework HTTP 関数は Flask test request context で駆動する。
@@ -190,7 +190,7 @@ class TestGenerateSignedUrl:
     def test_filename_format_is_timestamp_uuid8_title_ext(self):
         """filename が {timestamp}_{uuid8}_{title}.{ext} 形式であることを固定する。
 
-        summarize-monologue が '_' で split し第3要素以降をタイトルとして使うため形式変更禁止。
+        monologue-summarizer が '_' で split し第3要素以降をタイトルとして使うため形式変更禁止。
         """
         patches, _ = _patch_gcp()
         with patches[0], patches[1]:

@@ -24,10 +24,10 @@ flowchart TD
 
     subgraph "Google Cloud"
         B[▶️ Cloud Run functions 1
-        （upload-monologue）]
+        （monologue-uploader）]
         C[📦 Cloud Storage]
         D[▶️ Cloud Run functions 2
-        （summarize-monologue）]
+        （monologue-summarizer）]
         E[✨ Gemini API]
         F[💾 Firestore]
     end
@@ -62,9 +62,9 @@ flowchart TD
   - Python で実装
   - [Functions Framework](https://cloud.google.com/functions/docs/running/function-frameworks?hl=ja) を使用
 
-  - 1 つ目: upload_monologue
+  - 1 つ目: generate_signed_url
     - iPhone から音声を GCS にアップロード
-  - 2 つ目: summarize_monologue
+  - 2 つ目: monologue_summarizer
     - GCS に アップロードされた音声ファイルを処理して Notion に格納
 
 - Firestore (Google Cloud)
@@ -80,12 +80,13 @@ flowchart TD
 
 ## 開発
 
-依存とテストは [uv](https://docs.astral.sh/uv/) で管理しています（デプロイ用の依存の正本は各サービスの `requirements.txt`）。振る舞いの仕様は各サービスの `tests/` が正本です。
+依存とテストは [uv](https://docs.astral.sh/uv/) で管理しています。依存の正本は `pyproject.toml` のサービス別グループと `uv.lock` で、各サービスの `requirements.txt` はそこから生成します。振る舞いの仕様は各サービスの `tests/` が正本です。
 
 ```bash
-# 2 つのサービスがどちらも main.py を持つため、テストはサービス単位で実行する
-uv run pytest upload-monologue
-uv run pytest summarize-monologue
+# 各サービスが main.py を持つため、テストはサービス単位で実行する
+uv run pytest monologue-uploader
+uv run pytest monologue-summarizer
+uv run pytest monologue-notifier
 
 # lint
 uv run ruff check .
@@ -126,7 +127,7 @@ flowchart TD
 
 	subgraph "Google Cloud"
 		B[▶️ Cloud Run functions 1
-		（upload-monologue）]
+		（monologue-uploader）]
 		C[📦 Cloud Storage（GCS）]
 	end
 
@@ -154,7 +155,7 @@ flowchart TD
    - Storage オブジェクトユーザー `roles/storage.objectUser`
    - サービス アカウント トークン作成者 `roles/iam.serviceAccountTokenCreator`
 
-4. Cloud Run functions 1 (upload-monologue) をデプロイ
+4. Cloud Run functions 1 (monologue-uploader) をデプロイ
 
    ※ デプロイ用に gcloud login しておく
 
@@ -163,11 +164,11 @@ flowchart TD
    ```
 
    ```bash
-   cd upload-monologue
+   cd monologue-uploader
    ```
 
    ```bash
-   gcloud run deploy upload-monologue \
+   gcloud run deploy monologue-uploader \
    		--source . \
    		--function generate_signed_url \
    		--base-image python312 \
@@ -180,7 +181,7 @@ flowchart TD
    		--service-account=[サービスアカウント名]@[プロジェクトID].iam.gserviceaccount.com
    ```
 
-   デプロイ成功後に表示される`https://upload-monologue-xxxxxxxx-an.a.run.app` のような URL をコピー
+   デプロイ成功後に表示される`https://monologue-uploader-xxxxxxxx-an.a.run.app` のような URL をコピー
 
 5. iOS ショートカット初期設定
 
@@ -200,7 +201,7 @@ flowchart TD
     subgraph "Google Cloud"
         C[📦 Cloud Storage]
         D[▶️ Cloud Run functions 2
-        （summarize-monologue）]
+        （monologue-summarizer）]
         E[✨ Gemini API]
         F[💾 Firestore]
     end
@@ -245,16 +246,16 @@ flowchart TD
    1. `gemini-free-api-key` で[Google AI Studio](https://aistudio.google.com/apikey) の API キーを設定。
    2. `notion-api-key` で Notion インテグレーションの`Internal Integration Secret` を設定。
 
-5. Cloud Run functions 2 (summarize-monologue) をデプロイ
+5. Cloud Run functions 2 (monologue-summarizer) をデプロイ
 
    ```bash
-   cd summarize-monologue
+   cd monologue-summarizer
    ```
 
    ```bash
-   gcloud run deploy summarize-monologue \
+   gcloud run deploy monologue-summarizer \
    		--source . \
-   		--function summarize_monologue \
+      --function monologue_summarizer \
    		--base-image python312 \
    		--region asia-northeast1 \
    		--memory 512Mi \
@@ -269,11 +270,20 @@ flowchart TD
 
 6. トリガーを設定
 
-   これを設定することで、`③ 音声ファイルをアップロード`で Cloud Run functions 2 (summarize-monologue)が発火します。
+   これを設定することで、`③ 音声ファイルをアップロード`で Cloud Run functions 2 (monologue-summarizer)が発火します。
+
+   既に `monologue-muser-trigger` を作成済みの場合は、新しいサービスへ転送するよう更新します。
+
+   ```bash
+   gcloud eventarc triggers update monologue-muser-trigger \
+   --location=asia-northeast1 \
+   --destination-run-service=monologue-summarizer \
+   --destination-run-region=asia-northeast1
+   ```
 
    ```bash
    gcloud eventarc triggers create monologue-muser-trigger \
-   --destination-run-service=summarize-monologue \
+   --destination-run-service=monologue-summarizer \
    --destination-run-region=asia-northeast1 \
    --event-filters="type=google.cloud.storage.object.v1.finalized" \
    --event-filters="bucket=[GCSバケット名]" \

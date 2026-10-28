@@ -5,14 +5,15 @@ import main
 import pytest
 
 
-def _cloud_event(bucket="bucket", name="20240101_abcd1234_メモ.m4a"):
-    return types.SimpleNamespace(data={"bucket": bucket, "name": name})
+def _cloud_event(bucket="bucket", name="20240101_abcd1234_メモ.m4a", generation="123"):
+    return types.SimpleNamespace(data={"bucket": bucket, "name": name, "generation": generation})
 
 
 class TestLocalTmpPath:
-    def test_strips_directories_from_object_name(self):
-        # GCS オブジェクト名にスラッシュが含まれても /tmp 直下の安全なパスになる。
-        assert main._local_tmp_path("nested/dir/file.m4a") == "/tmp/file.m4a"
+    def test_同じ名前の並行処理でも一時ファイルは別になる(self):
+        assert main._local_tmp_path("nested/dir/file.m4a", "first") != main._local_tmp_path(
+            "nested/dir/file.m4a", "second"
+        )
 
 
 def _patch_pipeline(monkeypatch, *, start=True, download=True, summary=None,
@@ -41,24 +42,26 @@ def _patch_pipeline(monkeypatch, *, start=True, download=True, summary=None,
 class TestSummarizeMonologue:
     def test_skips_when_already_processing(self, monkeypatch):
         rec = _patch_pipeline(monkeypatch, start=False)
-        result = main.summarize_monologue(_cloud_event())
+        result = main.monologue_summarizer(_cloud_event())
         assert result == "Event already processed or in progress"
         assert "failed" not in rec
 
     def test_happy_path_completes(self, monkeypatch):
         rec = _patch_pipeline(monkeypatch)
-        result = main.summarize_monologue(_cloud_event())
+        result = main.monologue_summarizer(_cloud_event())
         assert result == "処理が正常に完了しました"
         assert "failed" not in rec
 
     def test_download_failure_marks_failed_for_retry(self, monkeypatch):
         rec = _patch_pipeline(monkeypatch, download=False)
-        main.summarize_monologue(_cloud_event())
+        with pytest.raises(RuntimeError, match="ダウンロード"):
+            main.monologue_summarizer(_cloud_event())
         assert rec.get("failed") is True
 
     def test_notion_failure_marks_failed_for_retry(self, monkeypatch):
         rec = _patch_pipeline(monkeypatch, notion=False)
-        main.summarize_monologue(_cloud_event())
+        with pytest.raises(RuntimeError, match="Notion"):
+            main.monologue_summarizer(_cloud_event())
         assert rec.get("failed") is True
 
     def test_unexpected_exception_marks_failed_for_retry(self, monkeypatch):
@@ -68,8 +71,8 @@ class TestSummarizeMonologue:
             raise RuntimeError("kaboom")
 
         monkeypatch.setattr(main, "transcribe_and_summarize", boom)
-        result = main.summarize_monologue(_cloud_event())
-        assert result.startswith("Error:")
+        with pytest.raises(RuntimeError, match="kaboom"):
+            main.monologue_summarizer(_cloud_event())
         assert rec.get("failed") is True
 
     def test_tmp_file_removed_in_finally(self, monkeypatch):
@@ -77,8 +80,9 @@ class TestSummarizeMonologue:
         removed = {}
         monkeypatch.setattr(main.os.path, "exists", lambda p: True)
         monkeypatch.setattr(main.os, "remove", lambda p: removed.setdefault("path", p))
-        main.summarize_monologue(_cloud_event(name="dir/x.m4a"))
-        assert removed["path"] == "/tmp/x.m4a"
+        main.monologue_summarizer(_cloud_event(name="dir/x.m4a"))
+        assert removed["path"].startswith("/tmp/")
+        assert removed["path"].endswith("-x.m4a")
 
 
 class TestRequiredEnv:
@@ -89,5 +93,35 @@ class TestRequiredEnv:
         monkeypatch.setattr(main, "try_start_processing", lambda *a: called.setdefault("x", True))
 
         with pytest.raises(config.MissingEnvError, match="NOTION_API_KEY"):
-            main.summarize_monologue(_cloud_event())
+            main.monologue_summarizer(_cloud_event())
         assert "x" not in called
+
+
+def test_処理失敗は再配信のため例外を返す(monkeypatch):
+    _patch_pipeline(monkeypatch, download=False)
+    with pytest.raises(RuntimeError, match="ダウンロード"):
+        main.monologue_summarizer(_cloud_event())
+
+
+def test_完了記録後の削除例外では再処理しない(monkeypatch):
+    rec = _patch_pipeline(monkeypatch)
+
+    def fail(*args):
+        raise RuntimeError("削除失敗")
+
+    monkeypatch.setattr(main, "delete_file_from_gcs", fail)
+    with pytest.raises(RuntimeError, match="削除失敗"):
+        main.monologue_summarizer(_cloud_event())
+    assert "failed" not in rec
+
+
+def test_イベントの世代を識別とダウンロードと削除に使う(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    calls = {}
+    monkeypatch.setattr(main, "generate_event_id", lambda *a: calls.setdefault("id", a) and "eid")
+    monkeypatch.setattr(main, "download_file_from_gcs", lambda *a: calls.setdefault("download", a))
+    monkeypatch.setattr(main, "delete_file_from_gcs", lambda *a: calls.setdefault("delete", a))
+    main.monologue_summarizer(_cloud_event(generation="123"))
+    assert calls["id"][-1] == "123"
+    assert calls["download"][-1] == 123
+    assert calls["delete"][-1] == 123

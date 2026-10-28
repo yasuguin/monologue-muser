@@ -71,7 +71,7 @@ def generate_signed_url(request):
 
     iOS ショートカットから呼ばれる。
     ファイル名形式: {timestamp}_{uuid8}_{title}.{ext}
-    (summarize-monologue が第3要素以降をタイトルとして使うため形式変更禁止)
+    (monologue-summarizer が第3要素以降をタイトルとして使うため形式変更禁止)
     """
     # preflight CORS
     if request.method == "OPTIONS":

@@ -21,6 +21,7 @@ jobs:
       # uv.lock と pyproject.toml がずれていれば失敗させる
       - run: uv sync --locked
       - run: uv run ruff check .
-      # 2 サービスの main.py はモジュール名が衝突するため、pytest はサービス単位で回す
-      - run: uv run pytest upload-monologue
-      - run: uv run pytest summarize-monologue
+      # 各サービスの main.py はモジュール名が衝突するため、pytest はサービス単位で回す
+      - run: uv run pytest monologue-uploader
+      - run: uv run pytest monologue-summarizer
+      - run: uv run pytest monologue-notifier

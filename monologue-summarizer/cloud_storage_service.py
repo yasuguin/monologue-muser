@@ -12,11 +12,11 @@ def _get_client() -> storage.Client:
     return _storage_client
 
 
-def download_file_from_gcs(bucket_name, file_name, local_file_path):
+def download_file_from_gcs(bucket_name, file_name, local_file_path, generation):
     """GCS からファイルをダウンロードする。成功で True。"""
     try:
         bucket = _get_client().bucket(bucket_name)
-        blob = bucket.blob(file_name)
+        blob = bucket.blob(file_name, generation=generation)
         blob.download_to_filename(local_file_path)
         print(f"GCSからファイル '{file_name}' を '{local_file_path}' にダウンロードしました。")
         return True
@@ -25,12 +25,12 @@ def download_file_from_gcs(bucket_name, file_name, local_file_path):
         return False
 
 
-def delete_file_from_gcs(bucket_name, file_name):
+def delete_file_from_gcs(bucket_name, file_name, generation):
     """GCS からファイルを削除する。成功で True。"""
     try:
         bucket = _get_client().bucket(bucket_name)
         blob = bucket.blob(file_name)
-        blob.delete()
+        blob.delete(if_generation_match=generation)
         print(f"GCSバケット '{bucket_name}' からファイル '{file_name}' を削除しました。")
         return True
     except Exception as e:

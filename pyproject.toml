@@ -10,12 +10,12 @@ requires-python = ">=3.12"
 dependencies = []
 
 [dependency-groups]
-upload-monologue = [
+monologue-uploader = [
     "functions-framework>=3.10",
     "google-cloud-storage>=3",
     "flask>=3.1.3",
 ]
-summarize-monologue = [
+monologue-summarizer = [
     "functions-framework>=3.10",
     "google-cloud-storage>=3",
     "google-cloud-firestore>=2.13",
@@ -23,18 +23,23 @@ summarize-monologue = [
     "requests>=2.33",
     "pydantic>=2.5",
 ]
+monologue-notifier = [
+    "functions-framework>=3.10",
+    "google-cloud-firestore>=2.13",
+    "requests>=2.33",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.8",
-    # テストは本番と同じライブラリを import するため、開発側にも両サービス分を入れる
-    { include-group = "upload-monologue" },
-    { include-group = "summarize-monologue" },
+    # テストは本番と同じライブラリを import するため、開発側にも各サービス分を入れる
+    { include-group = "monologue-uploader" },
+    { include-group = "monologue-summarizer" },
+    { include-group = "monologue-notifier" },
 ]
 
 [tool.pytest.ini_options]
-# 2サービスとも main.py を持ちモジュール名が衝突するため、
-# pytest はサービス単位で実行する: uv run pytest upload-monologue / summarize-monologue
-testpaths = ["upload-monologue/tests", "summarize-monologue/tests"]
+# 各サービスの main.py が衝突するため、pytest はサービス単位で実行する。
+testpaths = ["monologue-uploader/tests", "monologue-summarizer/tests", "monologue-notifier/tests"]
 
 [tool.ruff]
 line-length = 100

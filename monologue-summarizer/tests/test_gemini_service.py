@@ -1,4 +1,5 @@
 import gemini_service
+import pytest
 from schema import SummaryResponse, TranscriptionResponse
 
 
@@ -65,12 +66,8 @@ class TestTranscribeAndSummarize:
         client.files.upload = lambda file: (_ for _ in ()).throw(RuntimeError("boom"))
         monkeypatch.setattr(gemini_service, "_get_client", lambda: client)
 
-        result = gemini_service.transcribe_and_summarize("/tmp/x.m4a")
-
-        assert set(result) == {"markdown", "nextActions", "tags"}
-        assert result["nextActions"] == []
-        assert result["tags"] == ["文字起こしエラー"]
-        assert "boom" in result["markdown"]
+        with pytest.raises(RuntimeError, match="boom"):
+            gemini_service.transcribe_and_summarize("/tmp/x.m4a")
 
     def test_returns_symmetric_keys_on_summary_error(self, monkeypatch):
         transcription = TranscriptionResponse(transcription="t")
@@ -87,7 +84,15 @@ class TestTranscribeAndSummarize:
         client.models.generate_content = flaky
         monkeypatch.setattr(gemini_service, "_get_client", lambda: client)
 
-        result = gemini_service.transcribe_and_summarize("/tmp/x.m4a")
+        with pytest.raises(RuntimeError, match="summary boom"):
+            gemini_service.transcribe_and_summarize("/tmp/x.m4a")
 
-        assert result["tags"] == ["要約エラー"]
-        assert result["nextActions"] == []
+
+def test_文字起こし失敗は再試行できるよう例外を伝える(monkeypatch):
+    import pytest
+
+    client = _FakeClient([])
+    client.files.upload = lambda file: (_ for _ in ()).throw(RuntimeError("boom"))
+    monkeypatch.setattr(gemini_service, "_get_client", lambda: client)
+    with pytest.raises(RuntimeError, match="boom"):
+        gemini_service.transcribe_and_summarize("/tmp/x.m4a")

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-_SERVICE = "summarize-monologue"
+_SERVICE = "monologue-notifier"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _REQUIREMENTS = _REPO_ROOT / _SERVICE / "requirements.txt"
 

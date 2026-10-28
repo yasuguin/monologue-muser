@@ -10,7 +10,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-_SERVICE = "upload-monologue"
+_SERVICE = "monologue-uploader"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _REQUIREMENTS = _REPO_ROOT / _SERVICE / "requirements.txt"
 
