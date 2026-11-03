@@ -6,7 +6,9 @@
 
 import os
 
-_REQUIRED_NAMES = ("COLLECTION_NAME", "GEMINI_API_KEY", "NOTION_API_KEY", "NOTION_DATABASE_ID")
+_REQUIRED_NAMES = (
+    "COLLECTION_NAME", "GEMINI_API_KEY", "NOTION_API_KEY", "NOTION_DATABASE_ID", "PROJECT_ID",
+)
 
 
 class MissingEnvError(RuntimeError):
@@ -46,3 +48,8 @@ def notion_api_key() -> str:
 
 def notion_database_id() -> str:
     return _required("NOTION_DATABASE_ID")
+
+
+def project_id() -> str:
+    # Gemini の無料枠を使い切ったときに呼ぶ Agent Platform の課金先。
+    return _required("PROJECT_ID")

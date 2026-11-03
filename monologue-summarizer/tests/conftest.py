@@ -7,6 +7,7 @@ _REQUIRED_ENV = {
     "GEMINI_API_KEY": "test-gemini-key",
     "NOTION_API_KEY": "test-notion-key",
     "NOTION_DATABASE_ID": "test-database-id",
+    "PROJECT_ID": "test-project",
 }
 
 

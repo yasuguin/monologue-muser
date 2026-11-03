@@ -1,8 +1,7 @@
-import os
 import uuid
 
 import functions_framework
-from cloud_storage_service import delete_file_from_gcs, download_file_from_gcs
+from cloud_storage_service import delete_file_from_gcs, open_file_from_gcs
 from config import require_all
 from firestore_service import (
     generate_event_id,
@@ -12,15 +11,6 @@ from firestore_service import (
 )
 from gemini_service import transcribe_and_summarize
 from notion_service import send_to_notion
-
-
-def _local_tmp_path(file_name: str, owner: str) -> str:
-    """GCS オブジェクト名から /tmp 内の安全なローカルパスを作る。
-
-    GCS のオブジェクト名にはスラッシュが合法に含まれるため、そのまま /tmp に連結すると
-    存在しないサブディレクトリへの書き込みになり失敗する。basename 化して回避する。
-    """
-    return f"/tmp/{owner}-{os.path.basename(file_name)}"
 
 
 @functions_framework.cloud_event
@@ -45,16 +35,13 @@ def monologue_summarizer(cloud_event):
 
     print(f"新規処理開始: ファイル名={file_name}, バケット名={bucket_name}, イベントID={event_id}")
 
-    local_file_path = _local_tmp_path(file_name, owner)
-
     try:
-        # 1. GCS から音声ファイルをダウンロード
-        if not download_file_from_gcs(bucket_name, file_name, local_file_path, generation):
-            # 失敗時は重複防止ドキュメントを消し、再配信/再アップロードでの再処理を可能にする。
-            raise RuntimeError("ファイルのダウンロード中にエラーが発生しました")
-
-        # 2. Gemini API で文字起こしと要約を実行
-        result_json = transcribe_and_summarize(local_file_path)
+        # 1. GCS の音声を読みながら Gemini API へ送り、文字起こしと要約を実行
+        with open_file_from_gcs(bucket_name, file_name, generation) as audio:
+            # MIME タイプはアップロード時に拡張子から決めた Content-Type を使う。
+            result_json = transcribe_and_summarize(
+                audio, data["contentType"], f"gs://{bucket_name}/{file_name}"
+            )
         markdown_content = result_json["markdown"]
         next_action_list = result_json["nextActions"]
         next_action_markdown = (
@@ -64,7 +51,7 @@ def monologue_summarizer(cloud_event):
         )
         tags = result_json["tags"]
 
-        # 3. Notion に結果を送信
+        # 2. Notion に結果を送信
         if not send_to_notion(file_name, markdown_content, next_action_markdown, tags):
             raise RuntimeError("Notionへの送信中にエラーが発生しました")
 
@@ -77,11 +64,6 @@ def monologue_summarizer(cloud_event):
         # 例外時も重複防止ドキュメントを消して再試行可能にする。
         mark_processing_failed(event_id, bucket_name, file_name, owner)
         raise
-
-    finally:
-        # 一時ファイル削除は成功・失敗いずれの経路でも必ず行う。
-        if os.path.exists(local_file_path):
-            os.remove(local_file_path)
 
     # 完了後の削除失敗では完了記録を消さない。
     delete_file_from_gcs(bucket_name, file_name, generation)

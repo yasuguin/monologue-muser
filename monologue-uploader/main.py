@@ -1,4 +1,5 @@
 import datetime
+import hmac
 import os
 import uuid
 
@@ -17,6 +18,22 @@ def _bucket_name() -> str:
     if not value:
         raise RuntimeError("必須の環境変数 BUCKET_NAME が未設定です")
     return value
+
+
+# 呼び出し元（iOS ショートカット）と共有する API キー。Secret Manager から環境変数で注入する。
+# 関数の URL は公開なので、これが無いと URL を知った誰でもバケットへ書き込め、要約の課金を起こせる。
+def _api_key() -> str:
+    value = os.environ.get("UPLOADER_API_KEY", "")
+    if not value:
+        raise RuntimeError("必須の環境変数 UPLOADER_API_KEY が未設定です")
+    return value
+
+
+def _is_authorized(request) -> bool:
+    """Authorization: Bearer <API キー> を、比べる時間から推測されないよう定数時間で比べる。"""
+    scheme, _, token = request.headers.get("Authorization", "").partition(" ")
+    return scheme == "Bearer" and hmac.compare_digest(token.encode(), _api_key().encode())
+
 
 # 拡張子 → MIME タイプの対応表。
 # GCS 署名付き PUT URL は content_type を署名対象に含めるため、
@@ -81,7 +98,7 @@ def generate_signed_url(request):
             {
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "POST",
-                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
                 "Access-Control-Max-Age": "3600",
             },
         )
@@ -89,6 +106,9 @@ def generate_signed_url(request):
     headers = {"Access-Control-Allow-Origin": "*"}
 
     try:
+        if not _is_authorized(request):
+            return jsonify({"error": "unauthorized"}), 401, headers
+
         request_data = request.get_json()
 
         if not request_data or "title" not in request_data:

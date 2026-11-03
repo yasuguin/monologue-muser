@@ -22,19 +22,24 @@ from main import (  # local
 # ---------------------------------------------------------------------------
 
 _FAKE_URL = "https://storage.googleapis.com/fake-bucket/fake-object?X-Goog-Signature=xxx"
+_API_KEY = "test-api-key"
+_AUTH = {"Authorization": f"Bearer {_API_KEY}"}
 
 
 def _make_app() -> Flask:
     return Flask(__name__)
 
 
-def _call(app: Flask, body: dict | None, method: str = "POST") -> tuple:
-    """generate_signed_url を Flask test request context で呼び出す。"""
+def _call(
+    app: Flask, body: dict | None, method: str = "POST", headers: dict | None = _AUTH
+) -> tuple:
+    """generate_signed_url を Flask test request context で呼び出す。既定は正しい API キー付き。"""
     with app.test_request_context(
         "/",
         method=method,
         data=json.dumps(body),
         content_type="application/json",
+        headers=headers,
     ):
         from flask import request as flask_request
 
@@ -136,6 +141,7 @@ class TestGenerateSignedUrl:
     @pytest.fixture(autouse=True)
     def _bucket_env(self, monkeypatch):
         monkeypatch.setenv("BUCKET_NAME", "test-bucket")
+        monkeypatch.setenv("UPLOADER_API_KEY", _API_KEY)
 
     def setup_method(self):
         self.app = _make_app()
@@ -151,6 +157,35 @@ class TestGenerateSignedUrl:
         assert status == 204
         assert headers["Access-Control-Allow-Origin"] == "*"
         assert "POST" in headers["Access-Control-Allow-Methods"]
+        assert "Authorization" in headers["Access-Control-Allow-Headers"]
+
+    # --- 認証: URL を知っただけの第三者に、バケットへの書き込みと要約の課金を起こさせない ---
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            None,
+            {"Authorization": "Bearer wrong-key"},
+            {"Authorization": _API_KEY},  # Bearer の前置きが無い
+        ],
+    )
+    def test_APIキーが無いか違えば401で署名付きURLを作らない(self, headers):
+        patches, mock_blob = _patch_gcp()
+        with patches[0], patches[1]:
+            _, status, _ = _call(self.app, {"title": "テスト"}, headers=headers)
+        assert status == 401
+        mock_blob.generate_signed_url.assert_not_called()
+
+    def test_サーバーのAPIキーが未設定なら誰も通さない(self, monkeypatch):
+        monkeypatch.setenv("UPLOADER_API_KEY", "")
+        patches, mock_blob = _patch_gcp()
+        with patches[0], patches[1]:
+            # 空のキー同士が一致して通ることがないよう、空の Bearer を送る。
+            _, status, _ = _call(
+                self.app, {"title": "テスト"}, headers={"Authorization": "Bearer "}
+            )
+        assert status == 500
+        mock_blob.generate_signed_url.assert_not_called()
 
     # --- バリデーション ---
 
@@ -261,6 +296,10 @@ class TestGenerateSignedUrl:
 
 
 class TestBucketNameEnv:
+    @pytest.fixture(autouse=True)
+    def _api_key_env(self, monkeypatch):
+        monkeypatch.setenv("UPLOADER_API_KEY", _API_KEY)
+
     def test_設定済みならその値を返す(self, monkeypatch):
         monkeypatch.setenv("BUCKET_NAME", "my-bucket")
         assert _bucket_name() == "my-bucket"

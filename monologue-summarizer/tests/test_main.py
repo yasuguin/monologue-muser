@@ -6,14 +6,20 @@ import pytest
 
 
 def _cloud_event(bucket="bucket", name="20240101_abcd1234_メモ.m4a", generation="123"):
-    return types.SimpleNamespace(data={"bucket": bucket, "name": name, "generation": generation})
+    return types.SimpleNamespace(data={
+        "bucket": bucket, "name": name, "generation": generation, "contentType": "audio/mp4",
+    })
 
 
-class TestLocalTmpPath:
-    def test_同じ名前の並行処理でも一時ファイルは別になる(self):
-        assert main._local_tmp_path("nested/dir/file.m4a", "first") != main._local_tmp_path(
-            "nested/dir/file.m4a", "second"
-        )
+class _FakeAudio:
+    def __init__(self):
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
 
 
 def _patch_pipeline(monkeypatch, *, start=True, download=True, summary=None,
@@ -23,7 +29,13 @@ def _patch_pipeline(monkeypatch, *, start=True, download=True, summary=None,
 
     monkeypatch.setattr(main, "generate_event_id", lambda *a: "eid")
     monkeypatch.setattr(main, "try_start_processing", lambda *a: start)
-    monkeypatch.setattr(main, "download_file_from_gcs", lambda *a: download)
+
+    def open_audio(*a):
+        if not download:
+            raise RuntimeError("GCSからのファイルダウンロード中にエラーが発生しました")
+        return _FakeAudio()
+
+    monkeypatch.setattr(main, "open_file_from_gcs", open_audio)
     monkeypatch.setattr(main, "transcribe_and_summarize", lambda *a: summary)
     monkeypatch.setattr(main, "send_to_notion", lambda *a: notion)
     monkeypatch.setattr(main, "delete_file_from_gcs", lambda *a: True)
@@ -34,8 +46,6 @@ def _patch_pipeline(monkeypatch, *, start=True, download=True, summary=None,
         return True
 
     monkeypatch.setattr(main, "mark_processing_failed", failed)
-    # 一時ファイル削除は副作用を持たせず観測のみ。
-    monkeypatch.setattr(main.os.path, "exists", lambda p: False)
     return recorder
 
 
@@ -75,14 +85,25 @@ class TestSummarizeMonologue:
             main.monologue_summarizer(_cloud_event())
         assert rec.get("failed") is True
 
-    def test_tmp_file_removed_in_finally(self, monkeypatch):
+    def test_GCSの音声を溜めずにイベントのMIMEタイプでGeminiへ渡す(self, monkeypatch):
+        # 368MB の AIFF を /tmp（Cloud Run ではメモリ）に落として 512Mi を超えた。
         _patch_pipeline(monkeypatch)
-        removed = {}
-        monkeypatch.setattr(main.os.path, "exists", lambda p: True)
-        monkeypatch.setattr(main.os, "remove", lambda p: removed.setdefault("path", p))
-        main.monologue_summarizer(_cloud_event(name="dir/x.m4a"))
-        assert removed["path"].startswith("/tmp/")
-        assert removed["path"].endswith("-x.m4a")
+        audio = _FakeAudio()
+        monkeypatch.setattr(main, "open_file_from_gcs", lambda *a: audio)
+        received = {}
+
+        def transcribe(file, mime_type, gcs_uri):
+            received.update(file=file, mime_type=mime_type, gcs_uri=gcs_uri, closed=file.closed)
+            return {"markdown": "m", "nextActions": [], "tags": ["t"]}
+
+        monkeypatch.setattr(main, "transcribe_and_summarize", transcribe)
+        main.monologue_summarizer(_cloud_event())
+        # gcs_uri は無料枠を使い切ったときに Agent Platform へ音声を渡す経路。
+        assert received == {
+            "file": audio, "mime_type": "audio/mp4",
+            "gcs_uri": "gs://bucket/20240101_abcd1234_メモ.m4a", "closed": False,
+        }
+        assert audio.closed
 
 
 class TestRequiredEnv:
@@ -119,7 +140,9 @@ def test_イベントの世代を識別とダウンロードと削除に使う(m
     _patch_pipeline(monkeypatch)
     calls = {}
     monkeypatch.setattr(main, "generate_event_id", lambda *a: calls.setdefault("id", a) and "eid")
-    monkeypatch.setattr(main, "download_file_from_gcs", lambda *a: calls.setdefault("download", a))
+    monkeypatch.setattr(
+        main, "open_file_from_gcs", lambda *a: calls.setdefault("download", a) and _FakeAudio()
+    )
     monkeypatch.setattr(main, "delete_file_from_gcs", lambda *a: calls.setdefault("delete", a))
     main.monologue_summarizer(_cloud_event(generation="123"))
     assert calls["id"][-1] == "123"

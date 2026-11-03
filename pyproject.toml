@@ -7,6 +7,7 @@
 name = "monologue-muser-dev"
 version = "0.0.0"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = []
 
 [dependency-groups]
@@ -30,6 +31,7 @@ monologue-notifier = [
 ]
 dev = [
     "pytest>=8",
+    "pyyaml>=6.0.3",
     "ruff>=0.8",
     # テストは本番と同じライブラリを import するため、開発側にも各サービス分を入れる
     { include-group = "monologue-uploader" },

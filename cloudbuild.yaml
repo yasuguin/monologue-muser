@@ -1,0 +1,86 @@
+# 3 つの Cloud Run functions のデプロイ設定の正本。3 つを並列にデプロイする。
+#
+# 個人の値（バケット名・ID・SA）は repo に置かず、substitutions で渡す:
+#   gcloud builds submit --config cloudbuild.yaml --project <PROJECT_ID> \
+#     --substitutions=_BUCKET_NAME=<GCS バケット名>,_COLLECTION_NAME=<Firestore コレクション名>,\
+#   _NOTION_DATABASE_ID=<Notion データベース ID>,_DISCORD_NOTIFY_CHANNEL_ID=<Discord チャンネル ID>,\
+#   _RUNTIME_SERVICE_ACCOUNT=<実行時の SA のメールアドレス>
+# API キーは Secret Manager の secret 名だけを書く。secret はアプリをまたいで共用する
+# （monologue-uploader-api-key だけはこのアプリ専用）。
+steps:
+  - id: monologue-uploader
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    dir: monologue-uploader
+    waitFor: ['-']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - monologue-uploader
+      - --source=.
+      - --function=generate_signed_url
+      - --base-image=python312
+      - --project=$PROJECT_ID
+      - --region=asia-northeast1
+      - --memory=512Mi
+      - --timeout=300s
+      # iOS ショートカットから IAM 無しで呼ぶため公開する。呼び出しは UPLOADER_API_KEY で確かめる。
+      - --allow-unauthenticated
+      - --set-env-vars=BUCKET_NAME=${_BUCKET_NAME}
+      - --set-secrets=UPLOADER_API_KEY=monologue-uploader-api-key:latest
+      - --set-build-env-vars=GOOGLE_FUNCTION_SOURCE=main.py
+      - --service-account=${_RUNTIME_SERVICE_ACCOUNT}
+      - --quiet
+
+  - id: monologue-summarizer
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    dir: monologue-summarizer
+    waitFor: ['-']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - monologue-summarizer
+      - --source=.
+      - --function=monologue_summarizer
+      - --base-image=python312
+      - --project=$PROJECT_ID
+      - --region=asia-northeast1
+      # 音声は /tmp に落とさず GCS から読みながら送るので、数百 MB の音声でも 512Mi に収まる。
+      - --memory=512Mi
+      - --timeout=300s
+      # Eventarc（GCS へのアップロード）からだけ呼ばれる。公開すると、偽のイベントで任意のバケットの
+      # ファイルを要約させ、課金を起こせる。トリガーの SA に roles/run.invoker が要る。
+      - --no-allow-unauthenticated
+      - --set-env-vars=PROJECT_ID=$PROJECT_ID,COLLECTION_NAME=${_COLLECTION_NAME},GEMINI_MODEL=gemini-2.5-flash,NOTION_DATABASE_ID=${_NOTION_DATABASE_ID}
+      - --set-secrets=GEMINI_API_KEY=gemini-free-api-key:latest,NOTION_API_KEY=notion-api-key:latest
+      - --set-build-env-vars=GOOGLE_FUNCTION_SOURCE=main.py
+      - --service-account=${_RUNTIME_SERVICE_ACCOUNT}
+      - --quiet
+
+  - id: monologue-notifier
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    dir: monologue-notifier
+    waitFor: ['-']
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - monologue-notifier
+      - --source=.
+      - --function=monologue_notifier
+      - --base-image=python312
+      - --project=$PROJECT_ID
+      - --region=asia-northeast1
+      - --memory=512Mi
+      - --timeout=60s
+      # デッドレターの Eventarc からだけ呼ばれる。
+      - --no-allow-unauthenticated
+      - --set-env-vars=COLLECTION_NAME=${_COLLECTION_NAME},DISCORD_NOTIFY_CHANNEL_ID=${_DISCORD_NOTIFY_CHANNEL_ID}
+      - --set-secrets=DISCORD_NOTIFY_BOT_TOKEN=discord-notify-bot-token:latest
+      - --set-build-env-vars=GOOGLE_FUNCTION_SOURCE=main.py
+      - --service-account=${_RUNTIME_SERVICE_ACCOUNT}
+      - --quiet
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,14 @@
+# gcloud builds submit で送るソース。このファイルがあると .gitignore は読まれない。
+.gcloudignore
+.git/
+.github/
+.venv/
+private/
+gha-creds-*.json
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.claude/
+.codex/
+.agents/
+.DS_Store

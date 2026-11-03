@@ -1,8 +1,13 @@
 import json
 import textwrap
+from collections.abc import Callable
+from typing import BinaryIO
 
 import config
+import google.auth.exceptions
+import httpx
 from google import genai
+from google.genai import errors, types
 from schema import SummaryResponse, TranscriptionResponse
 
 # genai.Client は import 時ではなく初回利用時に生成する。
@@ -15,6 +20,71 @@ def _get_client() -> genai.Client:
     if _genai_client is None:
         _genai_client = genai.Client(api_key=config.gemini_api_key())
     return _genai_client
+
+
+# 無料枠（Gemini Developer API の API キー）を使い切ったときだけ、実行時の SA で
+# Agent Platform（Vertex AI）を従量で呼ぶ。global は gemini-2.5-flash を受けるエンドポイント。
+_VERTEX_LOCATION = "global"
+_vertex_client: genai.Client | None = None
+
+
+def _get_vertex_client() -> genai.Client:
+    global _vertex_client
+    if _vertex_client is None:
+        _vertex_client = genai.Client(
+            vertexai=True, project=config.project_id(), location=_VERTEX_LOCATION
+        )
+    return _vertex_client
+
+
+# 無料枠の上限を一度踏んだら、この instance の間は Agent Platform を先に呼ぶ。
+# 上限は分・日単位で戻るので、次の instance からはまた無料枠を先に試す。
+_prefer_agent_platform = False
+
+_QUOTA_WORDS = ("quota", "resource_exhausted", "too many requests", "rate limit", "exceeded")
+
+
+class UnparsableResponseError(RuntimeError):
+    """structured output を解釈できない応答。別の経路なら解釈できる応答が返り得る。"""
+
+
+def _is_quota_exhausted(error: Exception) -> bool:
+    if not isinstance(error, errors.APIError):
+        return False
+    text = f"{error.status} {error.message}".lower()
+    return error.code == 429 or any(word in text for word in _QUOTA_WORDS)
+
+
+def _can_fall_back(error: Exception) -> bool:
+    """経路を変えれば直り得る失敗か。400・404 のような依頼そのものの誤りは別の経路でも直らない。"""
+    if isinstance(error, errors.APIError):
+        return error.code in (403, 429) or error.code >= 500 or _is_quota_exhausted(error)
+    return isinstance(
+        error, (httpx.TransportError, google.auth.exceptions.GoogleAuthError,
+                UnparsableResponseError)
+    )
+
+
+def _call_with_fallback[T](task: str, developer_api: Callable[[], T],
+                           agent_platform: Callable[[], T]) -> T:
+    """無料枠（Developer API）と Agent Platform を順に試す。
+
+    上限を踏んだ後は Agent Platform を先にする。
+    """
+    global _prefer_agent_platform
+    routes = [("Developer API", developer_api), ("Agent Platform", agent_platform)]
+    if _prefer_agent_platform:
+        routes.reverse()
+    for index, (name, call) in enumerate(routes):
+        try:
+            return call()
+        except Exception as e:
+            if index == len(routes) - 1 or not _can_fall_back(e):
+                raise
+            if name == "Developer API" and _is_quota_exhausted(e):
+                _prefer_agent_platform = True
+            print(f"{task}を {name} で呼べなかったため {routes[index + 1][0]} でやり直します: {e}")
+    raise AssertionError("経路が空")
 
 
 # プロンプト文字列は仕様の一部。文言は変更しない。
@@ -83,14 +153,10 @@ def _build_summary_prompt(transcription: str) -> str:
     """)  # noqa: E501  プロンプト本文は仕様であり改行で折り返せない
 
 
-def _transcribe(file_path: str) -> str:
-    """音声ファイルを文字起こししてテキストを返す。"""
-    client = _get_client()
-    audio_file = client.files.upload(file=file_path)
-
+def _generate_transcription(client: genai.Client, audio) -> str:
     transcription_response = client.models.generate_content(
         model=config.gemini_model(),
-        contents=[_TRANSCRIPTION_PROMPT, audio_file],
+        contents=[_TRANSCRIPTION_PROMPT, audio],
         config={
             'response_mime_type': 'application/json',
             'response_schema': TranscriptionResponse,
@@ -104,9 +170,24 @@ def _transcribe(file_path: str) -> str:
     return transcription_response.text
 
 
-def _summarize(transcription: str) -> dict:
-    """文字起こしテキストを整形・要約し、SummaryResponse 相当の dict を返す。"""
-    client = _get_client()
+def _transcribe(file: BinaryIO, mime_type: str, gcs_uri: str) -> str:
+    """音声ファイルを文字起こししてテキストを返す。"""
+
+    def developer_api() -> str:
+        client = _get_client()
+        # ファイルオブジェクトからは SDK が MIME タイプを推定できない。
+        audio_file = client.files.upload(file=file, config={"mime_type": mime_type})
+        return _generate_transcription(client, audio_file)
+
+    def agent_platform() -> str:
+        # Agent Platform では Files API が使えないため、GCS の音声を URI のまま渡す。
+        audio_part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
+        return _generate_transcription(_get_vertex_client(), audio_part)
+
+    return _call_with_fallback("文字起こし", developer_api, agent_platform)
+
+
+def _generate_summary(client: genai.Client, transcription: str) -> dict:
     summary_response = client.models.generate_content(
         model=config.gemini_model(),
         contents=_build_summary_prompt(transcription),
@@ -115,17 +196,30 @@ def _summarize(transcription: str) -> dict:
             'response_schema': SummaryResponse,
         },
     )
-    parsed: SummaryResponse = summary_response.parsed
+    parsed: SummaryResponse | None = summary_response.parsed
+    if parsed is None:
+        raise UnparsableResponseError("要約の応答を SummaryResponse として解釈できませんでした")
     return json.loads(parsed.model_dump_json())
 
 
-def transcribe_and_summarize(file_path: str) -> dict:
+def _summarize(transcription: str) -> dict:
+    """文字起こしテキストを整形・要約し、SummaryResponse 相当の dict を返す。"""
+    return _call_with_fallback(
+        "要約",
+        lambda: _generate_summary(_get_client(), transcription),
+        lambda: _generate_summary(_get_vertex_client(), transcription),
+    )
+
+
+def transcribe_and_summarize(file: BinaryIO, mime_type: str, gcs_uri: str) -> dict:
     """音声ファイルを文字起こし→整形要約し、markdown / nextActions / tags を返す。
+
+    gcs_uri は file と同じ音声の GCS 上の場所で、無料枠を使い切ったときに使う。
 
     失敗は呼び出し元に伝え、イベントの再配信につなげる。
     """
     try:
-        transcription = _transcribe(file_path)
+        transcription = _transcribe(file, mime_type, gcs_uri)
     except Exception as e:
         print(f"文字起こし中にエラーが発生しました: {e}")
         raise

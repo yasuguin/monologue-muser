@@ -1,5 +1,3 @@
-<!-- @format -->
-
 # monologue-muser
 
 ## 概要
@@ -13,6 +11,12 @@
 3. Notion にメモを文字起こししてまとめられた内容が格納される。
 
 ※ ボイスメモは`YYYYMMDD_title`という命名規則にして、`title` 部分を Notion のページ名にするようにしています。
+
+## 使う前に知っておくこと
+
+- **費用**: Gemini は [Google AI Studio](https://aistudio.google.com/apikey) の無料枠の API キーで呼びます。無料枠を使い切ると、同じモデルを Google Cloud の Agent Platform（旧 Vertex AI）で呼び直すため、従量課金が発生します。Google Cloud プロジェクトで課金を有効にしておく必要があります。Cloud Run・Cloud Storage・Firestore なども、無料枠を超えた分は課金されます。
+- **データの扱い**: AI Studio の無料枠では、送った音声と生成結果が Google の製品改善に使われ、人が読む場合があります。機密情報や個人情報を話したメモは送らないでください。詳しくは [Gemini API の追加利用規約](https://ai.google.dev/gemini-api/terms) を確認してください。
+- **認証**: アップロード用の関数（monologue-uploader）は iOS ショートカットから呼ぶため URL を公開しますが、API キー（`Authorization: Bearer <キー>`）が無い呼び出しは拒否します。キーは他人に渡さないでください。要約と通知の関数は公開せず、Eventarc からだけ呼ばれます。
 
 ## アーキテクチャ
 
@@ -48,12 +52,16 @@ flowchart TD
     E -- "⑦ 処理結果を返却" --> D
     D -- "⑧ 整形テキストを
 	ページに保存" --> G
+    D -. "再試行しても
+	失敗したとき" .-> H[Cloud Run functions 3
+	（monologue-notifier）]
+    H -- "失敗を通知" --> I[Discord]
 ```
 
 - iOS ショートカット
 
-  - [こちら]()からダウンロード。
-    ※ 許可なく二次配布はご遠慮いただきたいですが、個人利用の範囲内では自由に改造していただいて構いません。
+  - [こちら](https://www.icloud.com/shortcuts/d32c5e50446a440da2784546cb6a5b59)からダウンロード。
+    ※ ショートカットはこのリポジトリの MIT ライセンスの対象外です。許可なく二次配布はご遠慮いただきたいですが、個人利用の範囲内では自由に改造していただいて構いません。
 
 - Cloud Storage (GCS; Google Cloud)
 
@@ -62,17 +70,19 @@ flowchart TD
   - Python で実装
   - [Functions Framework](https://cloud.google.com/functions/docs/running/function-frameworks?hl=ja) を使用
 
-  - 1 つ目: generate_signed_url
-    - iPhone から音声を GCS にアップロード
-  - 2 つ目: monologue_summarizer
+  - 1 つ目: monologue-uploader（generate_signed_url）
+    - iPhone から音声を GCS にアップロードするための署名付き URL を返す。API キーで呼び出し元を確かめる
+  - 2 つ目: monologue-summarizer（monologue_summarizer）
     - GCS に アップロードされた音声ファイルを処理して Notion に格納
+  - 3 つ目: monologue-notifier（monologue_notifier）
+    - 要約が再試行しても終わらなかったとき（Pub/Sub のデッドレター）に、Discord へ知らせる
 
 - Firestore (Google Cloud)
   - GCS トリガーで Cloud Run functions を実行する際に、Firestore で実行回数を制御しないと、複数回実行されてしまうことがある。
 - Gemini
 
   - Gemini を使用して音声ファイルを文字起こし & 整形
-  - 無料枠を活用したいため、Google Cloud の VertexAI ではなく、[Google AI Studio](https://aistudio.google.com/apikey) の API キーを使用。
+  - 無料枠を活用したいため、まず [Google AI Studio](https://aistudio.google.com/apikey) の API キーで呼ぶ。無料枠を使い切ったら、Agent Platform（旧 Vertex AI）で同じモデルを従量課金で呼び直す。
 
 - Notion
 
@@ -87,6 +97,8 @@ flowchart TD
 uv run pytest monologue-uploader
 uv run pytest monologue-summarizer
 uv run pytest monologue-notifier
+# cloudbuild.yaml のデプロイ設定がコードの読む環境変数と一致するか
+uv run pytest tests
 
 # lint
 uv run ruff check .
@@ -116,6 +128,19 @@ git clone https://github.com/yasu-888/monologue-muser.git
   - [こちら](https://cloud.google.com/sdk/docs/install?hl=ja)よりインストール
   - Cloud Run functions のデプロイ等に使用。
   - なくても構築は可能だが、ある方がコンソールの操作をスキップできる。
+
+- 使う API を有効化済み
+
+  ```bash
+  gcloud services enable \
+    run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com \
+    eventarc.googleapis.com pubsub.googleapis.com storage.googleapis.com \
+    firestore.googleapis.com secretmanager.googleapis.com \
+    iamcredentials.googleapis.com aiplatform.googleapis.com \
+    --project [GoogleCloudのプロジェクトID]
+  ```
+
+  - `iamcredentials` は署名付き URL の署名に、`aiplatform` は無料枠を使い切ったときの Gemini の呼び直しに使う。
 
 ### ボイスメモをアップロードする仕組みを構築
 
@@ -154,44 +179,9 @@ flowchart TD
    - Secret Manager のシークレット アクセサー `roles/secretmanager.secretAccessor`
    - Storage オブジェクトユーザー `roles/storage.objectUser`
    - サービス アカウント トークン作成者 `roles/iam.serviceAccountTokenCreator`
+   - Vertex AI ユーザー `roles/aiplatform.user`（Gemini の無料枠を使い切ったとき、同じモデルを Agent Platform で従量で呼ぶため）
 
-4. Cloud Run functions 1 (monologue-uploader) をデプロイ
-
-   ※ デプロイ用に gcloud login しておく
-
-   ```bash
-   gcloud auth login
-   ```
-
-   ```bash
-   cd monologue-uploader
-   ```
-
-   ```bash
-   gcloud run deploy monologue-uploader \
-   		--source . \
-   		--function generate_signed_url \
-   		--base-image python312 \
-   		--region asia-northeast1 \
-   		--memory 512Mi \
-   		--timeout 300s \
-   		--allow-unauthenticated \
-   		--set-env-vars=PROJECT_ID=[GoogleCloudのプロジェクトID],BUCKET_NAME=[GCSバケット名] \
-   		--set-build-env-vars=GOOGLE_FUNCTION_SOURCE=main.py \
-   		--service-account=[サービスアカウント名]@[プロジェクトID].iam.gserviceaccount.com
-   ```
-
-   デプロイ成功後に表示される`https://monologue-uploader-xxxxxxxx-an.a.run.app` のような URL をコピー
-
-5. iOS ショートカット初期設定
-
-   - [こちら](https://www.icloud.com/shortcuts/d32c5e50446a440da2784546cb6a5b59)からショートカットをダウンロード
-   - Cloud Run functions のエンドポイントを先ほどコピーしたものに設定
-   - ショートカット内の `temp` の部分に iPhone 内の任意のフォルダを指定
-
-   **テスト**
-
-   実行してみて、ボイスメモが GCS にアップロードされるかを確認してみてください。
+4. Cloud Run functions 1 (monologue-uploader) のデプロイは、後の「デプロイ」で 3 つの関数をまとめて行う
 
 ### 音声ファイルを処理する仕組みを構築
 
@@ -245,30 +235,59 @@ flowchart TD
 
    1. `gemini-free-api-key` で[Google AI Studio](https://aistudio.google.com/apikey) の API キーを設定。
    2. `notion-api-key` で Notion インテグレーションの`Internal Integration Secret` を設定。
+   3. `discord-notify-bot-token` で、処理の失敗を知らせる Discord bot のトークンを設定（作り方は後の「失敗を Discord へ知らせる」）。
+   4. `monologue-uploader-api-key` で、iOS ショートカットが monologue-uploader を呼ぶときの API キーを設定。推測されにくいランダムな値にする。
 
-5. Cloud Run functions 2 (monologue-summarizer) をデプロイ
+      ```bash
+      openssl rand -hex 32 | tr -d '\n' | gcloud secrets create monologue-uploader-api-key --data-file=- --project [GoogleCloudのプロジェクトID]
+      ```
+
+### デプロイ
+
+デプロイ設定の正本は `cloudbuild.yaml` です。3 つの関数（uploader・summarizer・失敗を Discord へ知らせる notifier）を並列にデプロイします。
+個人の値は repo に置かず、`--substitutions` で渡します。API キーは Secret Manager の secret 名で参照します。
+
+1. 3 つの関数をデプロイ
+
+   ※ デプロイ用に gcloud login しておく
 
    ```bash
-   cd monologue-summarizer
+   gcloud auth login
    ```
 
    ```bash
-   gcloud run deploy monologue-summarizer \
-   		--source . \
-      --function monologue_summarizer \
-   		--base-image python312 \
-   		--region asia-northeast1 \
-   		--memory 512Mi \
-   		--timeout 300s \
-   		--allow-unauthenticated \
-   		--set-env-vars=PROJECT_ID=[GoogleCloudのプロジェクトID],BUCKET_NAME=[GCSバケット名],COLLECTION_NAME=[Firestoreコレクション名],GEMINI_MODEL=gemini-2.5-flash,NOTION_DATABASE_ID=[NotionデータベースID] \
-   		--set-secrets=GEMINI_API_KEY=gemini-free-api-key:latest,NOTION_API_KEY=notion-api-key:latest \
-   	  	--set-build-env-vars=GOOGLE_FUNCTION_SOURCE=main.py \
-   		--service-account=[サービスアカウント名]@[プロジェクト ID].iam.gserviceaccount.com
-
+   gcloud builds submit . \
+     --config cloudbuild.yaml \
+     --project [GoogleCloudのプロジェクトID] \
+     --substitutions=_BUCKET_NAME=[GCSバケット名],_COLLECTION_NAME=[Firestoreコレクション名],_NOTION_DATABASE_ID=[NotionデータベースID],_DISCORD_NOTIFY_CHANNEL_ID=[DiscordチャンネルID],_RUNTIME_SERVICE_ACCOUNT=[サービスアカウント名]@[プロジェクトID].iam.gserviceaccount.com
    ```
 
-6. トリガーを設定
+   デプロイ後、Cloud Run のコンソールで `monologue-uploader` の `https://monologue-uploader-xxxxxxxx-an.a.run.app` のような URL をコピー
+
+   summarizer と notifier は公開しないので、Eventarc が使うサービスアカウントに呼び出し権限を付ける。
+
+   ```bash
+   for service in monologue-summarizer monologue-notifier; do
+     gcloud run services add-iam-policy-binding "$service" \
+       --region=asia-northeast1 \
+       --member=serviceAccount:[サービスアカウント名]@[プロジェクトID].iam.gserviceaccount.com \
+       --role=roles/run.invoker
+   done
+   ```
+
+2. iOS ショートカット初期設定
+
+   - [こちら](https://www.icloud.com/shortcuts/d32c5e50446a440da2784546cb6a5b59)からショートカットをダウンロード
+   - Cloud Run functions のエンドポイントを先ほどコピーしたものに設定
+   - 署名付き URL を求めるリクエストのヘッダーに `Authorization: Bearer [monologue-uploader-api-key の値]` を設定
+   - ショートカット内の `temp` の部分に iPhone 内の任意のフォルダを指定
+
+   **テスト**
+
+   実行してみて、ボイスメモが GCS にアップロードされるかを確認してみてください。
+
+
+3. トリガーを設定
 
    これを設定することで、`③ 音声ファイルをアップロード`で Cloud Run functions 2 (monologue-summarizer)が発火します。
 
@@ -291,8 +310,51 @@ flowchart TD
    --location=asia-northeast1
    ```
 
-## 開発（エージェント向けファイル）
+### 失敗を Discord へ知らせる
 
-- `AGENTS.md`: エージェント向けの作業ルール
-- `.agents/skills/`: repo-local skill の正本
-- `.claude/skills`・`.codex/skills`: `.agents/skills` を指す symlink（Claude Code / Codex から参照）
+要約が再試行しても終わらないとき、Pub/Sub のデッドレターに落ちたイベントを monologue-notifier が受け取り、Discord に知らせます。使わない場合はこの節を飛ばしてかまいません（notifier はデプロイされても呼ばれないだけです）。
+
+1. Discord bot を用意する
+
+   1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーションを作り、Bot のトークンを Secret Manager の `discord-notify-bot-token` に設定する。
+   2. bot を通知先のサーバーに招待し、通知先チャンネルにメッセージを送る権限を付ける。
+   3. Discord の開発者モードを有効にし、チャンネルを右クリック →「チャンネル ID をコピー」。デプロイの `_DISCORD_NOTIFY_CHANNEL_ID` に渡す。
+
+2. デッドレターのトピックと、notifier へのトリガーを作る
+
+   ```bash
+   gcloud pubsub topics create monologue-dead-letter
+
+   gcloud eventarc triggers create monologue-dead-letter-trigger \
+   --location=asia-northeast1 \
+   --destination-run-service=monologue-notifier \
+   --destination-run-region=asia-northeast1 \
+   --event-filters="type=google.cloud.pubsub.topic.v1.messagePublished" \
+   --transport-topic=projects/[プロジェクトID]/topics/monologue-dead-letter \
+   --service-account=[サービスアカウント名]@[プロジェクトID].iam.gserviceaccount.com
+   ```
+
+3. 要約のトリガーの購読に、デッドレター先を設定する
+
+   購読の名前は Eventarc が自動で付けるので、先に調べます。
+
+   ```bash
+   SUBSCRIPTION=$(gcloud eventarc triggers describe monologue-muser-trigger \
+     --location=asia-northeast1 --format='value(transport.pubsub.subscription)')
+   PUBSUB_AGENT=service-[プロジェクト番号]@gcp-sa-pubsub.iam.gserviceaccount.com
+
+   # Pub/Sub が、失敗したメッセージをデッドレターへ移せるようにする
+   gcloud pubsub topics add-iam-policy-binding monologue-dead-letter \
+     --member="serviceAccount:${PUBSUB_AGENT}" --role=roles/pubsub.publisher
+   gcloud pubsub subscriptions add-iam-policy-binding "$SUBSCRIPTION" \
+     --member="serviceAccount:${PUBSUB_AGENT}" --role=roles/pubsub.subscriber
+
+   gcloud pubsub subscriptions update "$SUBSCRIPTION" \
+     --dead-letter-topic=monologue-dead-letter --max-delivery-attempts=10
+   ```
+
+   notifier は、要約がまだ処理中（10 分未満）なら通知を保留して再配信を待ち、完了していれば通知しません。
+
+## ライセンス
+
+[MIT License](LICENSE)

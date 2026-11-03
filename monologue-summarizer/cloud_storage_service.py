@@ -12,17 +12,18 @@ def _get_client() -> storage.Client:
     return _storage_client
 
 
-def download_file_from_gcs(bucket_name, file_name, local_file_path, generation):
-    """GCS からファイルをダウンロードする。成功で True。"""
-    try:
-        bucket = _get_client().bucket(bucket_name)
-        blob = bucket.blob(file_name, generation=generation)
-        blob.download_to_filename(local_file_path)
-        print(f"GCSからファイル '{file_name}' を '{local_file_path}' にダウンロードしました。")
-        return True
-    except Exception as e:
-        print(f"GCSからのファイルダウンロード中にエラーが発生しました: {e}")
-        return False
+# google-genai の 1 回の読み取り（8MB）ごとに GCS から 1 範囲だけ取り寄せる。
+_READ_CHUNK_SIZE = 8 * 1024 * 1024
+
+
+def open_file_from_gcs(bucket_name, file_name, generation):
+    """イベントの世代の GCS オブジェクトを、読んだ分だけ取り寄せるファイルとして開く。
+
+    Cloud Run の /tmp はメモリ上にあり、数百 MB の音声を落とすとメモリ上限を超えるため、
+    ローカルに保存せず Gemini へそのまま流す。
+    """
+    blob = _get_client().bucket(bucket_name).blob(file_name, generation=generation)
+    return blob.open("rb", chunk_size=_READ_CHUNK_SIZE)
 
 
 def delete_file_from_gcs(bucket_name, file_name, generation):
